@@ -12,7 +12,9 @@ from flask import Flask, request, jsonify, render_template
 
 from model import LSTMLM
 from generate import generate
-from retrieval import load_documents_from_dir, TfidfIndex
+from bpe import encode as bpe_encode, decode as bpe_decode
+from retrieval import load_documents_from_dir, BM25Index
+from embeddings import LSTMEmbeddingIndex, HybridIndex
 from agent import ReActAgent, SearchTool
 from memory import get_memory
 
@@ -38,10 +40,38 @@ else:
 # Index documentaire pour /api/ask : un fichier .txt = un document, dans
 # data/documents/. Optionnel — si le dossier est vide ou absent, /api/ask
 # renverra une erreur explicite plutôt que de planter.
-passages = load_documents_from_dir(DOCS_DIR)
-doc_index = TfidfIndex(passages) if passages else None
-if doc_index:
-    print(f"[app] Index documentaire : {len(passages)} passages depuis {DOCS_DIR}.")
+CHUNK_SIZE = 200   # tokens par tranche
+CHUNK_OVERLAP = 50  # tokens de chevauchement entre deux tranches consécutives
+
+# Si un modèle est déjà entraîné, on découpe avec ses VRAIS tokens BPE
+# (plus fidèle) ; sinon on retombe sur un découpage par mots (voir
+# retrieval.chunk_text). Dans les deux cas, la taille des tranches
+# reste comparable, ce qui compte pour BM25 (voir retrieval.py).
+_chunk_kwargs = {}
+if model_ready:
+    _chunk_kwargs = {
+        "encode_fn": lambda text: bpe_encode(text, merges, stoi),
+        "decode_fn": lambda ids: bpe_decode(ids, itos),
+    }
+
+passages = load_documents_from_dir(DOCS_DIR, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP,
+                                    **_chunk_kwargs)
+
+doc_index = None
+if passages:
+    lexical_index = BM25Index(passages)
+    doc_index = lexical_index
+    print(f"[app] Index BM25 : {len(passages)} tranches ({CHUNK_SIZE} tokens, "
+          f"chevauchement {CHUNK_OVERLAP}) depuis {DOCS_DIR}.")
+
+    if model_ready:
+        try:
+            semantic_index = LSTMEmbeddingIndex(passages, model, stoi, itos, merges)
+            doc_index = HybridIndex(lexical_index, semantic_index)
+            print("[app] Index sémantique LSTM construit — recherche hybride "
+                  "BM25 + embeddings activée (fusion par rang, voir embeddings.py).")
+        except Exception as exc:  # pragma: no cover - garde-fou, ne doit pas bloquer l'app
+            print(f"[app] Index sémantique indisponible ({exc}) — repli sur BM25 seul.")
 else:
     print(f"[app] Aucun document trouvé dans {DOCS_DIR} (mets des .txt là pour activer /api/ask).")
 
@@ -132,12 +162,15 @@ def api_ask():
     # Mémoire explicite : le client envoie le conversation_id reçu à son
     # premier échange (absent au tout premier appel -> on en crée un).
     memory = get_memory(conversation_id=data.get("conversation_id"))
-    memory.add("user", question)
 
     agent.min_score = min_score  # les curseurs de l'UI restent branchés
+    # L'agent doit voir la mémoire telle qu'elle était AVANT cette
+    # question (pour résoudre 'et ça ?' par rapport au tour précédent) —
+    # on n'enregistre donc la question courante qu'après coup.
     result = agent.run(question, memory=memory, mode=mode, top_k=top_k,
                         length=data.get("length", 80), temperature=data.get("temperature", 0.6))
 
+    memory.add("user", question)
     if result["answer"] is not None:
         memory.add("assistant", result["answer"])
 
