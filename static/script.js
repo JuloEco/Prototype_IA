@@ -115,6 +115,28 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Mémoire côté client : on retient juste l'id renvoyé par le serveur
+// au premier échange, et on le renvoie à chaque requête suivante pour
+// que /api/ask retrouve l'historique de CETTE conversation.
+let conversationId = null;
+
+const STEP_ICONS = { thought: "💭", action: "🔎", observation: "👀", final_answer: "✅" };
+const STEP_LABELS = {
+  thought: "Thought", action: "Action", observation: "Observation", final_answer: "Final Answer",
+};
+
+function renderTrace(trace) {
+  if (!trace || trace.length === 0) return "";
+  const items = trace
+    .map((s) => {
+      const icon = STEP_ICONS[s.step] || "•";
+      const label = STEP_LABELS[s.step] || s.step;
+      return `<div class="trace-step"><strong>${icon} ${label}</strong> — ${escapeHtml(s.content)}</div>`;
+    })
+    .join("");
+  return `<details class="trace"><summary>Raisonnement de l'agent (${trace.length} étapes)</summary>${items}</details>`;
+}
+
 function renderSources(sources) {
   if (!sources || sources.length === 0) return "";
   const items = sources
@@ -145,22 +167,26 @@ async function askQuestion() {
         mode: modeSelect.value,
         top_k: parseInt(chatTopK.value, 10),
         min_score: parseFloat(minScore.value),
+        conversation_id: conversationId,
       }),
     });
 
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Erreur serveur");
 
+    conversationId = data.conversation_id || conversationId;
+
     const bubbleEl = thinkingMsg.querySelector(".bubble");
     bubbleEl.classList.remove("typing");
 
     if (!data.answer) {
-      bubbleEl.innerHTML = `🤷 ${escapeHtml(data.note || "Aucune réponse trouvée.")}`;
+      bubbleEl.innerHTML = `🤷 ${escapeHtml(data.note || "Aucune réponse trouvée.")}` + renderTrace(data.trace);
     } else {
       bubbleEl.innerHTML =
         escapeHtml(data.answer) +
         renderSources(data.sources) +
-        (data.note ? `<div class="note">${escapeHtml(data.note)}</div>` : "");
+        (data.note ? `<div class="note">${escapeHtml(data.note)}</div>` : "") +
+        renderTrace(data.trace);
     }
   } catch (err) {
     const bubbleEl = thinkingMsg.querySelector(".bubble");
