@@ -13,6 +13,8 @@ from flask import Flask, request, jsonify, render_template
 from model import LSTMLM
 from generate import generate
 from retrieval import load_documents_from_dir, TfidfIndex
+from agent import ReActAgent, SearchTool
+from memory import get_memory
 
 app = Flask(__name__)
 
@@ -42,6 +44,40 @@ if doc_index:
     print(f"[app] Index documentaire : {len(passages)} passages depuis {DOCS_DIR}.")
 else:
     print(f"[app] Aucun document trouvé dans {DOCS_DIR} (mets des .txt là pour activer /api/ask).")
+
+
+def _answer_from_results(question: str, results: list, mode: str, **kwargs) -> tuple:
+    """Formule la réponse finale à partir des passages retenus par
+    l'agent. C'est exactement l'ancienne logique extractif/génératif de
+    /api/ask, juste déplacée ici pour servir d'`answerer` à l'agent —
+    l'agent ne sait pas COMMENT on répond, seulement QUAND il a assez
+    d'information pour le faire."""
+    if mode == "generative":
+        if not model_ready:
+            raise ValueError("Mode génératif demandé mais aucun modèle entraîné. "
+                              "Lance train.py, ou utilise mode='extractive'.")
+        top_score = results[0]["score"]
+        grounded_results = [r for r in results if r["score"] >= 0.6 * top_score]
+        context = "\n".join(r["text"] for r in grounded_results)
+
+        length = max(5, min(int(kwargs.get("length", 80)), 300))
+        temperature = max(0.05, min(float(kwargs.get("temperature", 0.6)), 2.5))
+        prompt = f"Contexte : {context}\nQuestion : {question}\nRéponse :"
+        answer = generate(model, merges, stoi, itos, prompt=prompt, length=length,
+                           temperature=temperature, top_k=30, top_p=0.9,
+                           context_bias_text=context, context_bias_strength=2.5)
+        note = ("Réponse générée par le LSTM à partir du contexte ci-dessous — "
+                "ce petit modèle n'a jamais été entraîné sur des paires question/réponse, "
+                "donc rien ne garantit qu'il s'appuie fidèlement sur le contexte plutôt "
+                "que d'inventer. Vérifie toujours avec les sources.")
+    else:
+        answer = results[0]["text"]
+        note = "Réponse extraite directement du document le plus pertinent (aucune génération)."
+    return answer, note
+
+
+search_tool = SearchTool(doc_index)
+agent = ReActAgent(tool=search_tool, answerer=_answer_from_results)
 
 
 @app.route("/")
@@ -89,54 +125,41 @@ def api_ask():
 
     if not question:
         return jsonify({"error": "Question vide."}), 400
+    if mode == "generative" and not model_ready:
+        return jsonify({"error": "Mode génératif demandé mais aucun modèle entraîné. "
+                                  "Lance train.py, ou utilise mode='extractive'."}), 400
 
-    results = doc_index.search(question, top_k=top_k)
-    results = [r for r in results if r["score"] >= min_score]
-    if not results:
-        return jsonify({
-            "answer": None,
-            "sources": [],
-            "note": "Aucun passage suffisamment pertinent trouvé pour cette question "
-                    "(rien ne dépasse le seuil de confiance) — mieux vaut ne rien répondre "
-                    "que d'improviser à partir d'un document sans rapport.",
-        })
+    # Mémoire explicite : le client envoie le conversation_id reçu à son
+    # premier échange (absent au tout premier appel -> on en crée un).
+    memory = get_memory(conversation_id=data.get("conversation_id"))
+    memory.add("user", question)
 
-    if mode == "generative":
-        if not model_ready:
-            return jsonify({"error": "Mode génératif demandé mais aucun modèle entraîné. "
-                                      "Lance train.py, ou utilise mode='extractive'."}), 400
+    agent.min_score = min_score  # les curseurs de l'UI restent branchés
+    result = agent.run(question, memory=memory, mode=mode, top_k=top_k,
+                        length=data.get("length", 80), temperature=data.get("temperature", 0.6))
 
-        # On ne garde que les passages VRAIMENT proches du meilleur score,
-        # pas tout le top_k demandé : un passage secondaire hors-sujet
-        # (score juste au-dessus du seuil, mais sans rapport avec la
-        # question — ex. une question sur la photosynthèse qui récupère
-        # aussi un passage sur les lois de Newton) pollue le prompt et
-        # aggrave la tendance du LSTM à partir dans une autre direction.
-        # Un LSTM sans mécanisme d'attention n'a aucun moyen de "ignorer"
-        # sélectivement une partie du contexte : mieux vaut lui donner
-        # MOINS de texte, mais plus fiable.
-        top_score = results[0]["score"]
-        grounded_results = [r for r in results if r["score"] >= 0.6 * top_score]
-        context = "\n".join(r["text"] for r in grounded_results)
+    if result["answer"] is not None:
+        memory.add("assistant", result["answer"])
 
-        length = max(5, min(int(data.get("length", 80)), 300))
-        temperature = max(0.05, min(float(data.get("temperature", 0.6)), 2.5))
-        prompt = f"Contexte : {context}\nQuestion : {question}\nRéponse :"
-        answer = generate(model, merges, stoi, itos, prompt=prompt, length=length,
-                           temperature=temperature, top_k=30, top_p=0.9,
-                           context_bias_text=context, context_bias_strength=2.5)
-        note = ("Réponse générée par le LSTM à partir du contexte ci-dessous — "
-                "ce petit modèle n'a jamais été entraîné sur des paires question/réponse, "
-                "donc rien ne garantit qu'il s'appuie fidèlement sur le contexte plutôt "
-                "que d'inventer. Vérifie toujours avec les sources.")
-    else:
-        # Mode extractif (par défaut) : on renvoie le passage le plus
-        # pertinent tel quel — pas d'invention possible, mais ce n'est
-        # plus le LSTM qui "répond", c'est une recherche documentaire.
-        answer = results[0]["text"]
-        note = "Réponse extraite directement du document le plus pertinent (aucune génération)."
+    return jsonify({
+        "answer": result["answer"],
+        "mode": mode,
+        "sources": result["sources"],
+        "note": result["note"],
+        "trace": result["trace"],              # Thought/Action/Observation/Final Answer
+        "conversation_id": memory.conversation_id,
+    })
 
-    return jsonify({"answer": answer, "mode": mode, "sources": results, "note": note})
+
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    """Repart d'une conversation vierge (bouton 'Nouvelle conversation'
+    côté client, par exemple)."""
+    data = request.get_json(force=True)
+    conversation_id = data.get("conversation_id")
+    if conversation_id:
+        get_memory(conversation_id=conversation_id).clear()
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
