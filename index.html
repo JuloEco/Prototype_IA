@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IA from scratch — Chat &amp; Génération</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <h1>🧠 IA from scratch — 100% NumPy</h1>
+    <p class="subtitle">
+      Réseau de neurones à fenêtre de contexte fixe, tokenisation BPE,
+      dropout, learning rate schedule et recherche documentaire TF-IDF,
+      sans aucun framework de deep learning.
+    </p>
+
+    {% if not model_ready %}
+    <div class="warning">
+      ⚠️ Aucun modèle entraîné trouvé. Lance <code>python train.py</code>
+      dans un terminal, puis recharge cette page.
+    </div>
+    {% endif %}
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="chat">💬 Chat sur mes documents</button>
+      <button class="tab-btn" data-tab="generate">✍️ Génération libre</button>
+    </div>
+
+    <!-- ===================== ONGLET CHAT ===================== -->
+    <section id="tab-chat" class="tab-panel active">
+      <p class="tab-desc">
+        Pose une question : le modèle cherche les passages les plus
+        pertinents dans <code>data/documents/*.txt</code> (par similarité
+        TF-IDF, pas de magie) et répond à partir de ces passages.
+      </p>
+
+      {% if not docs_ready %}
+      <div class="warning">
+        ⚠️ Aucun document indexé. Mets des fichiers <code>.txt</code> dans
+        <code>data/documents/</code> puis relance <code>python app.py</code>.
+      </div>
+      {% endif %}
+
+      <div class="chat-window" id="chat-window">
+        <div class="msg bot">
+          <div class="bubble">
+            Bonjour&nbsp;! Pose-moi une question sur le contenu de
+            <code>data/documents/</code>. En mode <strong>extractif</strong>
+            (par défaut), je ne réponds qu'avec des extraits réels des
+            documents — jamais d'invention.
+          </div>
+        </div>
+      </div>
+
+      <details class="advanced">
+        <summary>Réglages avancés</summary>
+        <div class="row">
+          <div class="field">
+            <label for="mode">Mode de réponse</label>
+            <select id="mode">
+              <option value="extractive" selected>Extractif — fiable, recopie le passage trouvé</option>
+              <option value="generative">Génératif — le LSTM reformule (peut halluciner)</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="chat-top-k">Passages recherchés : <span id="chat-top-k-value">3</span></label>
+            <input type="range" id="chat-top-k" min="1" max="8" value="3" step="1">
+          </div>
+          <div class="field">
+            <label for="min-score">Seuil de confiance : <span id="min-score-value">0.12</span> <span class="hint">(plus haut = plus strict)</span></label>
+            <input type="range" id="min-score" min="0" max="0.5" value="0.12" step="0.01">
+          </div>
+        </div>
+      </details>
+
+      <div class="chat-input-row">
+        <input type="text" id="chat-input" placeholder="Pose ta question..." autocomplete="off">
+        <button id="chat-send-btn" class="btn primary">Envoyer</button>
+      </div>
+    </section>
+
+    <!-- ================= ONGLET GÉNÉRATION LIBRE ================= -->
+    <section id="tab-generate" class="tab-panel">
+      <div class="field">
+        <label for="prompt">Début du texte (prompt)</label>
+        <input type="text" id="prompt" value="Il était" placeholder="Commence ta phrase...">
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="length">Longueur : <span id="length-value">60</span> tokens BPE</label>
+          <input type="range" id="length" min="5" max="300" value="60" step="5">
+        </div>
+        <div class="field">
+          <label for="temperature">Température : <span id="temp-value">0.8</span></label>
+          <input type="range" id="temperature" min="0.1" max="2.0" value="0.8" step="0.1">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="top-k">Top-k : <span id="top-k-value">20</span> <span class="hint">(0 = désactivé)</span></label>
+          <input type="range" id="top-k" min="0" max="100" value="20" step="5">
+        </div>
+        <div class="field">
+          <label for="top-p">Top-p : <span id="top-p-value">0.9</span> <span class="hint">(1.0 = désactivé)</span></label>
+          <input type="range" id="top-p" min="0.1" max="1.0" value="0.9" step="0.05">
+        </div>
+      </div>
+
+      <button id="generate-btn" class="btn primary">Générer</button>
+
+      <div class="output" id="output">Le texte généré apparaîtra ici...</div>
+    </section>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
