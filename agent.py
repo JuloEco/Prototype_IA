@@ -117,9 +117,19 @@ class ReActAgent:
     # ("et pour Paris ?", "pourquoi ?") qui n'ont aucun sens hors
     # contexte pour un TF-IDF (qui ne voit que des sacs de mots).
     # ------------------------------------------------------------------
+    _ELLIPTIC_MARKERS = {
+        "ça", "cela", "ca", "il", "elle", "lui", "leur", "en", "y",
+        "aussi", "et", "pourquoi", "comment", "sinon", "encore",
+    }
+
     def _resolve_query(self, question: str, memory, trace: list) -> str:
-        short_or_vague = len(question.split()) <= 3
-        if short_or_vague and memory is not None:
+        words = question.lower().split()
+        # Elliptique = très court ET contient un marqueur de reprise
+        # ("et ça ?", "pourquoi ?") — une question courte mais autonome
+        # ("photosynthèse ?") n'a pas besoin d'être combinée au tour
+        # précédent, la combiner ne ferait qu'ajouter du bruit.
+        is_elliptic = len(words) <= 4 and any(w.strip("?!.,") in self._ELLIPTIC_MARKERS for w in words)
+        if is_elliptic and memory is not None:
             previous = memory.last_user_question()
             if previous:
                 trace.append({
